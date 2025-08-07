@@ -2,101 +2,108 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import faiss
-import re
-import nltk
-from nltk.corpus import stopwords
 from sentence_transformers import SentenceTransformer
+import re
 
-# ------------------- NLTK Setup -------------------
-nltk.download('stopwords')
-stop_words = set(stopwords.words('english'))
-
-# ------------------- Load Data -------------------
+# ------------------- Load data and model -------------------
 df = pd.read_csv("patent_data.csv")
 embeddings = np.load("embeddings.npy")
 
-# ------------------- FAISS Index -------------------
 dimension = embeddings.shape[1]
 index = faiss.IndexFlatL2(dimension)
 index.add(embeddings)
 
-# ------------------- Load SentenceTransformer Model -------------------
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
-model = load_model()
+# ------------------- Helper Functions -------------------
+def clean_text(text):
+    return re.sub('<.*?>', '', str(text))
 
-# ------------------- Keyword Extraction -------------------
-def extract_keywords(text):
-    words = re.findall(r'\b\w+\b', text.lower())
-    return set([word for word in words if word not in stop_words and len(word) > 2])
-
-# ------------------- Streamlit UI -------------------
-st.title("🔎 Patent Semantic Search Engine")
-st.write("Search patents by meaning using AI-powered semantic search.")
-
-sort_option = st.selectbox(
-    "Sort results by:",
-    ["Semantic Score", "Publication Date (newest)", "Abstract Length"],
-    key="sort_selectbox"
-)
-
-query = st.text_input("Enter your search query:")
-top_k = st.slider("Number of results", 1, 10, 3)
-
-# ------------------- Search Logic -------------------
-if st.button("Search") and query:
-    clean_query = query.strip().lower()
-    query_embedding = model.encode([clean_query])
-    distances, indices = index.search(np.array(query_embedding), top_k)
-
-    query_keywords = extract_keywords(clean_query)
+def search(query, top_k=50):
+    query_embedding = model.encode([query])
+    D, I = index.search(query_embedding, top_k)
     results = []
 
-    for idx, dist in zip(indices[0], distances[0]):
-        row = df.iloc[idx].copy()
-        row['semantic_score'] = dist
-        row['abstract_length'] = len(str(row.get("abstract", "")))
+    for i, idx in enumerate(I[0]):
+        row = df.iloc[idx]
+        similarity_score = (1 - D[0][i] / 4) * 100
+        similarity_score = max(0, min(100, similarity_score))
 
-        matched_keywords = extract_keywords(
-            str(row.get("title", "")) + " " + str(row.get("abstract", ""))
-        ).intersection(query_keywords)
+        sentences = re.split(r'(?<=[.!?]) +', clean_text(row['abstract']))
+        most_similar = ""
+        max_sim = -1
+        for sent in sentences:
+            sent_vec = model.encode([sent])
+            sim = np.dot(sent_vec, query_embedding.T).flatten()[0]
+            if sim > max_sim:
+                max_sim = sim
+                most_similar = sent
 
-        row['match_keywords'] = list(matched_keywords)
-        results.append(row)
+        results.append({
+            "index": i + 1,
+            "similarity": similarity_score,
+            "most_similar_sentence": most_similar,
+            "title": clean_text(row.get('title', '')),
+            "abstract": clean_text(row.get('abstract', '')),
+            "patent_number": row.get('patent_number', ''),
+            "publication_date": row.get('publication_date', ''),
+            "application_number": row.get('application_number', ''),
+            "inventors": row.get('inventors', ''),
+            "assignee": row.get('assignee', '')
+        })
 
-    result_df = pd.DataFrame(results)
+    return results
 
-    # ------------------- Sorting Logic -------------------
-    if sort_option == "Semantic Score":
-        result_df = result_df.sort_values("semantic_score", ascending=True)
-    elif sort_option == "Publication Date (newest)":
-        result_df['publication_date'] = pd.to_datetime(result_df['publication_date'], errors='coerce')
-        result_df = result_df.sort_values("publication_date", ascending=False)
-    elif sort_option == "Abstract Length":
-        result_df = result_df.sort_values("abstract_length", ascending=False)
+# ------------------- Streamlit UI -------------------
+st.set_page_config(layout="wide")
+st.title("🔍 Semantic Patent Search")
 
-    # ------------------- Display Results -------------------
-    st.markdown(f"### 🔍 Top {top_k} Results for: `{query}`")
-    for _, row in result_df.iterrows():
-        st.markdown("----")
+# Clean single-line query input with icon
+query_col, icon_col = st.columns([9, 1])
+with query_col:
+    query = st.text_input("", placeholder="Enter your search query here...")
+with icon_col:
+    st.write("")  # vertical space
+    search_triggered = st.button("🔍")
 
-        # ------------------- Explanation FIRST -------------------
-        explanation = f"""
-        **Why this result?**  
-        → Semantic similarity score: **{row['semantic_score']:.4f}**  
-        → Matched keywords: _{', '.join(row['match_keywords']) if row['match_keywords'] else 'None'}_  
-        → This result was selected because it shares key concepts with your query.
-        """
-        st.markdown(explanation)
+# ------------------- Search and Display -------------------
+if query or search_triggered:
+    with st.spinner("Searching..."):
+        all_results = search(query)
 
-        # ------------------- Then Title and Patent Info -------------------
-        st.markdown(f"### {row.get('title', '')}")
-        st.write(f"**Patent Number:** {row.get('patent_number', 'N/A')}")
-        st.write(f"**Publication Date:** {row.get('publication_date', 'N/A')}")
-        st.write(f"**Inventors:** {row.get('inventors', 'N/A')}")
-        st.write(f"**Assignees:** {row.get('assignees', 'N/A')}")
+    # Pagination Setup
+    items_per_page = 10
+    total_pages = (len(all_results) + items_per_page - 1) // items_per_page
+    page = st.session_state.get("page", 1)
 
-        st.markdown("**Abstract:**")
-        st.markdown(row.get("abstract", "N/A"))
+    # Paginated results
+    start = (page - 1) * items_per_page
+    end = start + items_per_page
+    paginated_results = all_results[start:end]
+
+    for result in paginated_results:
+        # Why this result FIRST
+        st.markdown(f"**Why this result?**  \n"
+                    f"→ Similarity Score: `{result['similarity']:.2f}%`  \n"
+                    f"→ Most Relevant Sentence: “{result['most_similar_sentence']}”")
+
+        # Title
+        st.markdown(f"### {result['index']}. {result['title']}")
+
+        # Abstract
+        st.markdown(f"**Abstract:** {result['abstract']}")
+
+        # Metadata block
+        st.markdown(f"""
+        - **Patent Number**: {result['patent_number']}  
+        - **Publication Date**: {result['publication_date']}  
+        - **Application Number**: {result['application_number']}  
+        - **Inventors**: {result['inventors']}  
+        - **Assignee**: {result['assignee']}
+        """)
+
+        st.markdown("---")
+
+    # ------------------- Pagination Controls at Bottom -------------------
+    st.markdown("### 📄 Page Navigation")
+    page = st.number_input("Select Page", min_value=1, max_value=total_pages, value=page, step=1, key="page")
