@@ -6,16 +6,17 @@ import re
 from sentence_transformers import SentenceTransformer, util, CrossEncoder
 import json
 
-# Config
-TOP_K_RETRIEVE = 200  # Number of candidates retrieved from FAISS
-MAX_DISPLAY_RESULTS = 10  # Show only top 10 results
+# ------------------- Config -------------------
+TOP_K_RETRIEVE = 50      # Retrieve only 50 from FAISS to rerank
+FINAL_RESULTS = 10       # Show only top 10 results
+
 SYNONYMS = {
     "wireless": ["inductive", "contactless"],
     "charging": ["power transfer", "energy transfer"],
     # Add more synonyms as needed
 }
 
-# Load data and models
+# ------------------- Load data and models -------------------
 @st.cache_data(show_spinner=True)
 def load_data():
     df = pd.read_csv("patent_data.csv")
@@ -34,6 +35,7 @@ index.add(embeddings)
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
 reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2')
 
+# ------------------- Helper functions -------------------
 def clean_text(text):
     return re.sub('<.*?>', '', str(text))
 
@@ -62,20 +64,17 @@ def search(query, top_k=TOP_K_RETRIEVE):
             "faiss_score": D[0][i]
         })
 
+    # Rerank
     cross_inp = [(query, c['text']) for c in candidates]
     rerank_scores = reranker.predict(cross_inp)
 
     for c, score in zip(candidates, rerank_scores):
         c['rerank_score'] = score
 
-    # Sort by rerank score descending
     candidates = sorted(candidates, key=lambda x: x['rerank_score'], reverse=True)
 
-    # Take only top MAX_DISPLAY_RESULTS
-    candidates = candidates[:MAX_DISPLAY_RESULTS]
-
     results = []
-    for i, c in enumerate(candidates):
+    for i, c in enumerate(candidates[:FINAL_RESULTS]):
         abstract = clean_text(c['metadata'].get('abstract', ''))
         sentences = re.split(r'(?<=[.!?]) +', abstract)
         if sentences:
@@ -103,12 +102,17 @@ def search(query, top_k=TOP_K_RETRIEVE):
 
     return results
 
+# ------------------- Streamlit UI -------------------
 st.set_page_config(layout="wide")
-st.title("🔍 Semantic Patent Search - Top Results Only")
+st.title("🔍 Semantic Patent Search with Reranking & Synonyms")
 
 query_col, icon_col = st.columns([9, 1])
 with query_col:
-    query = st.text_input("", placeholder="Enter your search query here...")
+    query = st.text_input(
+        label="Search",
+        placeholder="Enter your search query here...",
+        label_visibility="collapsed"
+    )
 with icon_col:
     st.write("")
     search_triggered = st.button("🔍")
@@ -118,7 +122,7 @@ if query or search_triggered:
         all_results = search(query)
 
     total_results = len(all_results)
-    st.markdown(f"**Showing top {total_results} most relevant results**")
+    st.markdown(f"**Top {FINAL_RESULTS} results shown (from {TOP_K_RETRIEVE} retrieved)**")
 
     for result in all_results:
         st.markdown(f"**Why this result?**  \n"
