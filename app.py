@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import faiss
 import re
-from sentence_transformers import SentenceTransformer, util, CrossEncoder
+from sentence_transformers import SentenceTransformer, util
 import json
 import gdown
 import os
@@ -19,7 +19,7 @@ SYNONYMS = {
 # Google Drive file IDs
 FILE_IDS = {
     "csv": "1Asg94OHDh7iuqT58pqJWMwasTjL1OeK9",
-    "json":"1DYpxrBlIPzv90R83JU5EWO7GH_mbiL3r",
+    "json": "1DYpxrBlIPzv90R83JU5EWO7GH_mbiL3r",
     "npy": "19PeI46VPZL88RraHkOxxCnciJe4vnI9u"
 }
 
@@ -50,9 +50,8 @@ index = faiss.IndexFlatIP(dimension)
 faiss.normalize_L2(embeddings)
 index.add(embeddings)
 
-# Models
+# Model
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
-reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cpu")
 
 # ------------------- Helper functions -------------------
 def clean_text(text):
@@ -83,12 +82,8 @@ def search(query, top_k=TOP_K_RETRIEVE):
             "faiss_score": D[0][i]
         })
 
-    cross_inp = [(query, c['text']) for c in candidates]
-    rerank_scores = reranker.predict(cross_inp)
-    for c, score in zip(candidates, rerank_scores):
-        c['rerank_score'] = score
-
-    candidates = sorted(candidates, key=lambda x: x['rerank_score'], reverse=True)
+    # Sort only by FAISS similarity score
+    candidates = sorted(candidates, key=lambda x: x['faiss_score'], reverse=True)
 
     results = []
     for i, c in enumerate(candidates[:FINAL_RESULTS]):
@@ -106,7 +101,6 @@ def search(query, top_k=TOP_K_RETRIEVE):
         results.append({
             "index": i + 1,
             "similarity": c['faiss_score'] * 100,
-            "rerank_score": c['rerank_score'],
             "most_similar_sentence": best_sentence,
             "title": clean_text(c['metadata'].get('title', '')),
             "abstract": abstract,
@@ -120,7 +114,7 @@ def search(query, top_k=TOP_K_RETRIEVE):
 
 # ------------------- Streamlit UI -------------------
 st.set_page_config(layout="wide")
-st.title("🔍 Semantic Patent Search")
+st.title("🔍 Semantic Patent Search (FAISS Only)")
 
 query_col, icon_col = st.columns([9, 1])
 with query_col:
@@ -138,7 +132,6 @@ if query or search_triggered:
     for result in all_results:
         st.markdown(f"**Why this result?**\n"
                     f"→ FAISS Similarity Score: `{result['similarity']:.2f}%`\n"
-                    f"→ Rerank Score: `{result['rerank_score']:.4f}`\n"
                     f"→ Most Relevant Sentence: “{result['most_similar_sentence']}”")
         st.markdown(f"### {result['index']}. {result['title']}")
         st.markdown(f"**Abstract:** {result['abstract']}")
