@@ -5,33 +5,52 @@ import faiss
 import re
 from sentence_transformers import SentenceTransformer, util, CrossEncoder
 import json
+import gdown
+import os
 
 # ------------------- Config -------------------
-TOP_K_RETRIEVE = 50      # Retrieve only 50 from FAISS to rerank
-FINAL_RESULTS = 10       # Show only top 10 results
-
+TOP_K_RETRIEVE = 50
+FINAL_RESULTS = 10
 SYNONYMS = {
     "wireless": ["inductive", "contactless"],
     "charging": ["power transfer", "energy transfer"],
-    # Add more synonyms as needed
 }
 
-# ------------------- Load data and models -------------------
+# Google Drive file IDs
+FILE_IDS = {
+    "csv": "1Asg94OHDh7iuqT58pqJWMwasTjL1OeK9",
+    "json":"1DYpxrBlIPzv90R83JU5EWO7GH_mbiL3r",
+    "npy": "19PeI46VPZL88RraHkOxxCnciJe4vnI9u"
+}
+
+@st.cache_data(show_spinner=True)
+def download_file(file_id, output):
+    if not os.path.exists(output):
+        url = f"https://drive.google.com/uc?id={file_id}"
+        gdown.download(url, output, quiet=False)
+    return output
+
 @st.cache_data(show_spinner=True)
 def load_data():
-    df = pd.read_csv("patent_data.csv")
-    with open("combined_texts.json", "r", encoding="utf-8") as f:
+    csv_path = download_file(FILE_IDS["csv"], "patent_data.csv")
+    json_path = download_file(FILE_IDS["json"], "combined_texts.json")
+    npy_path = download_file(FILE_IDS["npy"], "patent_embeddings.npy")
+
+    df = pd.read_csv(csv_path)
+    with open(json_path, "r", encoding="utf-8") as f:
         combined_texts = json.load(f)
-    embeddings = np.load("patent_embeddings.npy", allow_pickle=True)  # <-- fix here
+    embeddings = np.load(npy_path, allow_pickle=True)
     return df, combined_texts, embeddings
 
 df, combined_texts, embeddings = load_data()
 
+# FAISS setup
 dimension = embeddings.shape[1]
 index = faiss.IndexFlatIP(dimension)
 faiss.normalize_L2(embeddings)
 index.add(embeddings)
 
+# Models
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
 reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cpu")
 
@@ -64,10 +83,8 @@ def search(query, top_k=TOP_K_RETRIEVE):
             "faiss_score": D[0][i]
         })
 
-    # Rerank
     cross_inp = [(query, c['text']) for c in candidates]
     rerank_scores = reranker.predict(cross_inp)
-
     for c, score in zip(candidates, rerank_scores):
         c['rerank_score'] = score
 
@@ -99,7 +116,6 @@ def search(query, top_k=TOP_K_RETRIEVE):
             "inventors": c['metadata'].get('inventors', ''),
             "assignee": c['metadata'].get('assignee', '')
         })
-
     return results
 
 # ------------------- Streamlit UI -------------------
@@ -108,11 +124,7 @@ st.title("🔍 Semantic Patent Search with Reranking & Synonyms")
 
 query_col, icon_col = st.columns([9, 1])
 with query_col:
-    query = st.text_input(
-        label="Search",
-        placeholder="Enter your search query here...",
-        label_visibility="collapsed"
-    )
+    query = st.text_input("Search", placeholder="Enter your search query here...", label_visibility="collapsed")
 with icon_col:
     st.write("")
     search_triggered = st.button("🔍")
@@ -121,13 +133,12 @@ if query or search_triggered:
     with st.spinner("Searching..."):
         all_results = search(query)
 
-    total_results = len(all_results)
     st.markdown(f"**Top {FINAL_RESULTS} results shown (from {TOP_K_RETRIEVE} retrieved)**")
 
     for result in all_results:
-        st.markdown(f"**Why this result?**  \n"
-                    f"→ FAISS Similarity Score: `{result['similarity']:.2f}%`  \n"
-                    f"→ Rerank Score: `{result['rerank_score']:.4f}`  \n"
+        st.markdown(f"**Why this result?**\n"
+                    f"→ FAISS Similarity Score: `{result['similarity']:.2f}%`\n"
+                    f"→ Rerank Score: `{result['rerank_score']:.4f}`\n"
                     f"→ Most Relevant Sentence: “{result['most_similar_sentence']}”")
         st.markdown(f"### {result['index']}. {result['title']}")
         st.markdown(f"**Abstract:** {result['abstract']}")
