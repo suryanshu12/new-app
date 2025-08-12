@@ -33,7 +33,7 @@ faiss.normalize_L2(embeddings)
 index.add(embeddings)
 
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
-reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2')
+reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cpu")
 
 # ------------------- Helper functions -------------------
 def clean_text(text):
