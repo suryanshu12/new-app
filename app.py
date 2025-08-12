@@ -22,7 +22,7 @@ def load_data():
     df = pd.read_csv("patent_data.csv")
     with open("combined_texts.json", "r", encoding="utf-8") as f:
         combined_texts = json.load(f)
-    embeddings = np.load("patent_embeddings.npy")
+    embeddings = np.load("patent_embeddings.npy", allow_pickle=True)  # <-- fix here
     return df, combined_texts, embeddings
 
 df, combined_texts, embeddings = load_data()
