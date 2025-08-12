@@ -120,7 +120,7 @@ def search(query, top_k=TOP_K_RETRIEVE):
 
 # ------------------- Streamlit UI -------------------
 st.set_page_config(layout="wide")
-st.title("🔍 Semantic Patent Search with Reranking & Synonyms")
+st.title("🔍 Semantic Patent Search")
 
 query_col, icon_col = st.columns([9, 1])
 with query_col:
