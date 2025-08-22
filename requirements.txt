@@ -3,5 +3,5 @@ pandas
 numpy
 faiss-cpu
 sentence-transformers
-nltk
 gdown
+google-generativeai

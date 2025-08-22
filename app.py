@@ -3,10 +3,11 @@ import pandas as pd
 import numpy as np
 import faiss
 import re
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer, util, CrossEncoder
 import json
 import gdown
 import os
+import google.generativeai as genai
 
 # ------------------- Config -------------------
 TOP_K_RETRIEVE = 50
@@ -16,11 +17,15 @@ SYNONYMS = {
     "charging": ["power transfer", "energy transfer"],
 }
 
+# Gemini API key setup
+genai.configure(api_key="AIzaSyB1LiX61P3nlDYPidUYyUM3yPx6Tvjtd_M")
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+
 # Google Drive file IDs
 FILE_IDS = {
     "csv": "1Asg94OHDh7iuqT58pqJWMwasTjL1OeK9",
-    "json": "1DYpxrBlIPzv90R83JU5EWO7GH_mbiL3r",
-    "npy": "19PeI46VPZL88RraHkOxxCnciJe4vnI9u"
+    "json":"1DYpxrBlIPzv90R83JU5EWO7GH_mbiL3r",
+    "npy": "1OXEsD8JAP83VAM9p3tUX4MiY6Lhu5UBu"
 }
 
 @st.cache_data(show_spinner=True)
@@ -34,7 +39,7 @@ def download_file(file_id, output):
 def load_data():
     csv_path = download_file(FILE_IDS["csv"], "patent_data.csv")
     json_path = download_file(FILE_IDS["json"], "combined_texts.json")
-    npy_path = download_file(FILE_IDS["npy"], "patent_embeddings.npy")
+    npy_path = download_file(FILE_IDS["npy"], "patent_embeddings_mpnet.npy")
 
     df = pd.read_csv(csv_path)
     with open(json_path, "r", encoding="utf-8") as f:
@@ -50,8 +55,9 @@ index = faiss.IndexFlatIP(dimension)
 faiss.normalize_L2(embeddings)
 index.add(embeddings)
 
-# Model
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+# Models
+embedder = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cpu")
 
 # ------------------- Helper functions -------------------
 def clean_text(text):
@@ -82,8 +88,12 @@ def search(query, top_k=TOP_K_RETRIEVE):
             "faiss_score": D[0][i]
         })
 
-    # Sort only by FAISS similarity score
-    candidates = sorted(candidates, key=lambda x: x['faiss_score'], reverse=True)
+    cross_inp = [(query, c['text']) for c in candidates]
+    rerank_scores = reranker.predict(cross_inp)
+    for c, score in zip(candidates, rerank_scores):
+        c['rerank_score'] = score
+
+    candidates = sorted(candidates, key=lambda x: x['rerank_score'], reverse=True)
 
     results = []
     for i, c in enumerate(candidates[:FINAL_RESULTS]):
@@ -101,6 +111,7 @@ def search(query, top_k=TOP_K_RETRIEVE):
         results.append({
             "index": i + 1,
             "similarity": c['faiss_score'] * 100,
+            "rerank_score": c['rerank_score'],
             "most_similar_sentence": best_sentence,
             "title": clean_text(c['metadata'].get('title', '')),
             "abstract": abstract,
@@ -112,9 +123,32 @@ def search(query, top_k=TOP_K_RETRIEVE):
         })
     return results
 
+# ------------------- Gemini RAG: Best Solution -------------------
+def generate_best_solution(query, results):
+    # Use abstracts + patent numbers to let Gemini select best matching solution
+    context_text = "\n\n".join([
+        f"Patent {r['patent_number']}: {r['abstract']}" for r in results
+    ])
+    prompt = f"""
+    You are a patent research assistant.
+    Based on the following patents, identify the best solution that answers the user's question.
+    Include the supporting patent number(s) in your answer.
+    If no patent matches, say "I don't know".
+
+    Context:
+    {context_text}
+
+    Question:
+    {query}
+
+    Best Solution:
+    """
+    response = gemini_model.generate_content(prompt)
+    return response.text.strip()
+
 # ------------------- Streamlit UI -------------------
 st.set_page_config(layout="wide")
-st.title("🔍 Semantic Patent Search (FAISS Only)")
+st.title("🔍 Semantic Patent Search + Gemini Best Solution")
 
 query_col, icon_col = st.columns([9, 1])
 with query_col:
@@ -127,11 +161,17 @@ if query or search_triggered:
     with st.spinner("Searching..."):
         all_results = search(query)
 
-    st.markdown(f"**Top {FINAL_RESULTS} results shown (from {TOP_K_RETRIEVE} retrieved)**")
+    with st.spinner("Generating best solution using Gemini..."):
+        best_solution = generate_best_solution(query, all_results)
 
+    st.subheader("💡 Best Solution (AI)")
+    st.markdown(best_solution)
+
+    st.markdown(f"**Top {FINAL_RESULTS} results shown (from {TOP_K_RETRIEVE} retrieved)**")
     for result in all_results:
         st.markdown(f"**Why this result?**\n"
-                    f"→ FAISS Similarity Score: `{result['similarity']:.2f}%`\n"
+                    f"→ FAISS Similarity Score: {result['similarity']:.2f}%\n"
+                    f"→ Rerank Score: {result['rerank_score']:.4f}\n"
                     f"→ Most Relevant Sentence: “{result['most_similar_sentence']}”")
         st.markdown(f"### {result['index']}. {result['title']}")
         st.markdown(f"**Abstract:** {result['abstract']}")
